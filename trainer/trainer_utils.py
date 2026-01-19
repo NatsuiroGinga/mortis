@@ -34,7 +34,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer
-from model.model_minimind import MiniMindForCausalLM
+from model.model import MortisForCausalLM
 
 
 def get_model_params(model, config):
@@ -333,11 +333,12 @@ def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', sav
     Returns:
         tuple: (model, tokenizer)
     """
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    # 加载分词器（转换为绝对路径以避免HuggingFace验证错误）
+    tokenizer_abs_path = os.path.abspath(tokenizer_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_abs_path, local_files_only=True, trust_remote_code=True)
 
     # 创建模型
-    model = MiniMindForCausalLM(lm_config)
+    model = MortisForCausalLM(lm_config)
 
     # 加载预训练权重
     if from_weight != 'none':

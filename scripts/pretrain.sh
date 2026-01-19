@@ -33,7 +33,7 @@ usage() {
 
 # 默认参数
 MODE=""
-DATA_PATH="../dataset/pretrain_hq.jsonl"
+DATA_PATH="./dataset/pretrain_hq.jsonl"
 EPOCHS=1
 LEARNING_RATE="5e-4"
 SAVE_DIR="../out"
@@ -123,12 +123,12 @@ echo "=========================================="
 # 根据模式设置不同的训练参数
 case $MODE in
     14g)
-        # 14G显存模式 - 适合RTX 4060 Ti 16G等显卡
+        # 14G显存模式 - 占满14G显存 (如NVIDIA L20)
         echo "使用14G显存模式配置..."
-        BATCH_SIZE=16
-        ACCUMULATION_STEPS=4
-        HIDDEN_SIZE=512
-        NUM_LAYERS=8
+        BATCH_SIZE=40
+        ACCUMULATION_STEPS=1
+        HIDDEN_SIZE=768
+        NUM_LAYERS=12
         MAX_SEQ_LEN=512
         GRAD_CLIP=1.0
         ;;
