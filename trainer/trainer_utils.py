@@ -312,7 +312,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         return None
 
 
-def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
+def init_model(lm_config, from_weight='pretrain', tokenizer_path='./model', save_dir='../out', device='cuda'):
     """
     初始化模型和分词器。
 

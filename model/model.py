@@ -568,15 +568,18 @@ class MortisModel(nn.Module):
         """
         batch_size, seq_len = input_ids.shape
 
-        # 处理 HuggingFace 风格的 past_key_values (可能有 .layers 属性)
-        if hasattr(past_key_values, "key_cache"):
+        # 处理 HuggingFace 风格的 past_key_values (DynamicCache 有 .layers 属性)
+        if hasattr(past_key_values, "layers"):
             past_key_values = None
 
         # 初始化各层的 KV Cache 为 None
         past_key_values = past_key_values or [None] * self.num_hidden_layers
 
         # 计算起始位置 (用于 KV Cache 场景下的位置编码)
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        if past_key_values[0] is not None:
+            start_pos = past_key_values[0][0].shape[2]  # [batch, num_heads, seq_len, head_dim]
+        else:
+            start_pos = 0
 
         # ========== Embedding ==========
         hidden_states = self.embed_tokens(input_ids)  # [batch_size, seq_len, hidden_size]
