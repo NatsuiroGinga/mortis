@@ -4,7 +4,7 @@ import random
 import warnings
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
-from model.model import MortisConfig, MortisForCausalLM
+from model.model_mortis import MortisConfig, MortisForCausalLM
 from trainer.trainer_utils import setup_seed, get_model_params
 warnings.filterwarnings("ignore")
 

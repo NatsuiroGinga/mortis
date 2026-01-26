@@ -34,7 +34,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Sampler
 from transformers import AutoTokenizer
-from model.model import MortisForCausalLM
+from model.model_mortis import MortisForCausalLM
 
 
 def get_model_params(model, config):
