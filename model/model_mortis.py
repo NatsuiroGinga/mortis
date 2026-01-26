@@ -425,6 +425,141 @@ class FeedForward(nn.Module):
                 )
             )
 
+
+class MOEGate(nn.Module):
+    def __init__(self, config: MortisConfig):
+        super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+        self.scoring_func = config.scoring_func
+        self.alpha = config.aux_loss_alpha
+        self.seq_aux = config.seq_aux
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gating_dim = config.hidden_size
+        self.weight = nn.Parameter(
+            torch.empty((self.n_routed_experts, self.gating_dim))
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+    def forward(self, hidden_states: torch.Tensor):
+        bsz, seq_len, h = hidden_states.shape
+        hidden_states = hidden_states.view(-1, h) # [bsz*seq_len, hidden_size]
+        logits = F.linear(hidden_states, self.weight, None) # [bsz*seq_len, n_routed_experts]
+        if self.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1) # [bsz*seq_len, n_routed_experts]
+        else:
+            raise NotImplementedError(f"insupportable scoring functional for MOE gating: {self.scoring_func}")
+        # 选择top_k个专家[bsz*seq_len, top_k]
+        topk_weight, topk_idx = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
+        # 归一化
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight /= denominator
+        # 计算辅助损失
+        if self.training and self.alpha > 0.0:
+            scores_for_aux = scores
+            aux_topk = self.top_k
+
+            topk_idx_for_aux_loss = topk_idx.view(bsz, -1)
+            # 序列级别的辅助损失
+            if self.seq_aux:
+                scores_for_seq_aux = scores_for_aux.view(bsz, seq_len, -1) # [bsz, seq_len, top]
+                ce = torch.zeros(bsz, self.n_routed_experts, device=hidden_states.device)
+                # 计算每个专家被选中的次数
+                ce.scatter_add_(1, topk_idx_for_aux_loss,
+                                torch.ones(bsz, seq_len*aux_topk, device=hidden_states.device)).div(seq_len * aux_topk / self.n_routed_experts)
+                aux_loss = (ce * scores_for_seq_aux.mean(dim=1)).sum(dim=1).mean() * self.alpha
+            else:
+                # [bsz*seq_len*top_k, n_routed_experts]
+                mask_ce = F.one_hot(topk_idx_for_aux_loss.view(-1), num_classes=self.n_routed_experts)
+                ce = mask_ce.float().mean(0) # [n_routed_experts]
+                Pi = scores_for_aux.mean(0) # [n_routed_experts]
+                fi = ce * self.n_routed_experts
+                aux_loss = (Pi * fi).sum() * self.alpha
+        else:
+            aux_loss = scores.new_zeros(1).squeeze()
+
+        return topk_idx, topk_weight, aux_loss
+                
+
+class MOEFeedForward(nn.Module):
+    def __init__(self, config: MortisConfig):
+        super().__init__()
+        self.config = config
+        self.experts = nn.ModuleList([
+            FeedForward(config)
+            for _ in range(config.n_routed_experts)
+        ])
+        self.gate = MOEGate(config)
+        if config.n_shared_experts > 0:
+            self.shared_experts = nn.ModuleList([
+                FeedForward(config)
+                for _ in range(config.n_shared_experts)
+            ])
+
+    def forward(self, x):
+        identity = x
+        orig_shape = x.shape
+        bsz, seq_len, _ = x.shape
+        topk_idx, topk_weight, aux_loss = self.gate(x)
+        # token数为N = bsz * seq_len, H = hidden_size, K = topk
+        x = x.view(-1, x.shape[-1]) # [N, H]
+        flat_topk_idx = topk_idx.view(-1) # [N * K]
+
+        if self.training:
+            # [N * K, H]
+            x = x.repeat_interleave(self.config.num_experts_per_tok, dim=0) 
+            y = torch.empty_like(x, dtype=x.dtype)
+            for i, expert in enumerate(self.experts):
+                expert_out = expert(x[flat_topk_idx == i])
+                if expert_out.shape[0] > 0:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype)
+                else:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype) + 0 * sum(p.sum() for p in expert.parameters())
+            # y.view: [N, K, H], topk_weight.unsqueeze: [N, K, 1]
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y = y.view(*orig_shape) # [bsz, seq_len, hidden_size]
+        else:
+            y = self.moe_infer(x, flat_topk_idx, topk_weight.view(-1, 1)).view(*orig_shape)
+
+        if self.config.n_shared_experts > 0:
+            for expert in self.shared_experts:
+                y = y + expert(identity)
+        self.aux_loss = aux_loss
+        return y
+    
+    @torch.no_grad()
+    def moe_infer(self, x, flat_expert_indices, flat_expert_weights):
+        # indices, weights: [N * K]
+        # x: [N, H]
+        expert_cache = torch.zeros_like(x) # 创建与输入形状相同的全0缓存
+        idxs = flat_expert_indices.argsort()
+        tokens_per_expert = flat_expert_indices.bincount().cpu().numpy().cumsum(0)
+        token_idxs = idxs // self.config.num_experts_per_tok
+        for i, end_idx in enumerate(tokens_per_expert):
+            start_idx = 0 if i == 0 else tokens_per_expert[i - 1]
+            if start_idx == end_idx:
+                continue # 该专家没有处理任何token
+            expert = self.experts[i]
+            # [M]
+            exp_token_idx = token_idxs[start_idx: end_idx]
+            # [M, H]
+            expert_tokens = x[exp_token_idx]
+            # [M, H]
+            expert_out = expert(expert_tokens).to(expert_cache.dtype)
+            expert_out.mul_(flat_expert_weights[idxs[start_idx: end_idx]])
+            expert_cache.scatter_add_(
+                    0, # dim = 0
+                    exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), # [M, H]
+                    expert_out # [M, H]
+            )
+        return expert_cache
+            
+
 class TransformerBlock(nn.Module):
     """
     Transformer 解码器块，采用 Pre-Norm 架构。
@@ -464,7 +599,7 @@ class TransformerBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 
         # 前馈网络 (SwiGLU 激活)
-        self.mlp = FeedForward(config)
+        self.mlp = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
 
     def forward(
         self,
@@ -518,6 +653,7 @@ class MortisModel(nn.Module):
     """
     def __init__(self, config: MortisConfig):
         super().__init__()
+        self.config = config
         self.vocab_size = config.vocab_size
         self.num_hidden_layers = config.num_hidden_layers
 
@@ -554,7 +690,7 @@ class MortisModel(nn.Module):
         past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         use_cache: bool = False,
         **kwargs
-    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]] | None]:
+    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]] | None, torch.Tensor | None]:
         """
         Args:
             input_ids: 输入 token IDs [batch_size, seq_len]
@@ -565,6 +701,7 @@ class MortisModel(nn.Module):
         Returns:
             hidden_states: 最终隐藏状态 [batch_size, seq_len, hidden_size]
             presents: 各层的 KV Cache 列表 (如果 use_cache=True)
+            aux_loss: MoE 辅助损失 (如果使用 MoE，否则为 None)
         """
         batch_size, seq_len = input_ids.shape
 
@@ -604,7 +741,18 @@ class MortisModel(nn.Module):
         # ========== 最终归一化 ==========
         hidden_states = self.norm(hidden_states)
 
-        return hidden_states, presents if use_cache else None
+        # ========== 聚合 MoE 辅助损失 ==========
+        aux_loss = None
+        if self.config.use_moe:
+            aux_losses = [
+                layer.mlp.aux_loss
+                for layer in self.layers
+                if hasattr(layer.mlp, 'aux_loss') and layer.mlp.aux_loss is not None
+            ]
+            if aux_losses:
+                aux_loss = sum(aux_losses)
+
+        return hidden_states, presents if use_cache else None, aux_loss
         
 
 class MortisForCausalLM(PreTrainedModel, GenerationMixin):
@@ -678,9 +826,10 @@ class MortisForCausalLM(PreTrainedModel, GenerationMixin):
                 - logits: 词表概率分布 [batch_size, seq_len or N, vocab_size]
                 - past_key_values: KV Cache
                 - hidden_states: 隐藏状态
+                - aux_loss: MoE 辅助损失 (如果使用 MoE)
         """
         # ========== 1. 前向传播获取隐藏状态 ==========
-        hidden_states, past_key_values = self.model(
+        hidden_states, past_key_values, aux_loss = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -695,11 +844,13 @@ class MortisForCausalLM(PreTrainedModel, GenerationMixin):
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
-        return CausalLMOutputWithPast(
+        output = CausalLMOutputWithPast(
             logits=logits,
             past_key_values=past_key_values,
             hidden_states=hidden_states
         )
+        output.aux_loss = aux_loss
+        return output
 
 
 

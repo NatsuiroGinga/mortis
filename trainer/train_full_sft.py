@@ -36,8 +36,9 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             res = model(X)
             loss = loss_fct(res.logits.view(-1, res.logits.size(-1)),
                             Y.view(-1)).view(Y.size())
-            loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss = loss / args.accumulation_steps
+            logits_loss = (loss * loss_mask).sum() / loss_mask.sum()
+            aux_loss = res.aux_loss if hasattr(res, 'aux_loss') and res.aux_loss is not None else 0.0
+            loss = (logits_loss + aux_loss) / args.accumulation_steps
 
         scaler.scale(loss).backward()
         

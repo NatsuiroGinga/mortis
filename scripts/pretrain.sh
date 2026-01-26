@@ -23,12 +23,14 @@ usage() {
     echo "  -e, --epochs NUM        训练轮数 (默认: 1)"
     echo "  -l, --learning-rate LR  学习率 (默认: 5e-4)"
     echo "  -s, --save-dir DIR     模型保存目录 (默认: ../out)"
+    echo "  -m, --moe              启用MoE架构 (Mixture of Experts)"
     echo "  -w, --wandb            启用wandb日志记录"
     echo "  -h, --help             显示此帮助信息"
     echo ""
     echo "示例:"
     echo "  $0 14g -e 2 -w                    # 14G模式，训练2轮，启用wandb"
     echo "  $0 24g -d /path/to/data.jsonl      # 24G模式，自定义数据路径"
+    echo "  $0 14g -m -w                      # 14G模式，MoE架构，启用wandb"
 }
 
 # 默认参数
@@ -37,6 +39,7 @@ DATA_PATH="./dataset/pretrain_hq.jsonl"
 EPOCHS=1
 LEARNING_RATE="5e-4"
 SAVE_DIR="../out"
+USE_MOE=0
 USE_WANDB=0
 
 # 解析命令行参数
@@ -61,6 +64,10 @@ while [[ $# -gt 0 ]]; do
         -s|--save-dir)
             SAVE_DIR="$2"
             shift 2
+            ;;
+        -m|--moe)
+            USE_MOE=1
+            shift
             ;;
         -w|--wandb)
             USE_WANDB=1
@@ -117,6 +124,7 @@ echo "训练轮数:          $EPOCHS"
 echo "学习率:            $LEARNING_RATE"
 echo "保存目录:          $SAVE_DIR"
 echo "设备:              $DEVICE"
+echo "MoE架构:           $([ $USE_MOE -eq 1 ] && echo "启用" || echo "禁用")"
 echo "WandB日志:         $([ $USE_WANDB -eq 1 ] && echo "启用" || echo "禁用")"
 echo "=========================================="
 
@@ -161,6 +169,7 @@ TRAIN_CMD="python trainer/train_pretrain.py \
     --hidden_size $HIDDEN_SIZE \
     --num_hidden_layers $NUM_LAYERS \
     --max_seq_len $MAX_SEQ_LEN \
+    --use_moe $USE_MOE \
     --log_interval 50 \
     --save_interval 500"
 

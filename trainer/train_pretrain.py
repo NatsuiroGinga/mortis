@@ -40,8 +40,9 @@ def train_epoch(epoch: int,
             res = model(X)
             loss = loss_fct(res.logits.view(-1, res.logits.size(-1)),
                             Y.view(-1)).view(Y.size())
-            loss = (loss * loss_mask).sum() / loss_mask.sum()
-            loss = loss / args.accumulation_steps
+            logits_loss = (loss * loss_mask).sum() / loss_mask.sum()
+            aux_loss = res.aux_loss if hasattr(res, 'aux_loss') and res.aux_loss is not None else 0.0
+            loss = (logits_loss + aux_loss) / args.accumulation_steps
 
         scaler.scale(loss).backward()
         if (step + 1) % args.accumulation_steps == 0:
@@ -54,11 +55,12 @@ def train_epoch(epoch: int,
         if step % args.log_interval == 0 or step == iters - 1:
             spend_time = time.time() - start_time
             current_loss = loss.item() * args.accumulation_steps
+            current_aux_loss = res.aux_loss.item() if hasattr(res, 'aux_loss') and res.aux_loss is not None else 0.0
             current_lr = optimizer.param_groups[-1]["lr"]
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
-            Logger(f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss:{current_loss:.4f}, learning_rate: {current_lr:.8f}, epoch_time: {eta_min:.3f}min")
+            Logger(f"Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss:{current_loss:.4f}, aux_loss:{current_aux_loss:.4f}, learning_rate: {current_lr:.8f}, epoch_time: {eta_min:.3f}min")
             if wandb:
-                wandb.log({"loss": current_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+                wandb.log({"loss": current_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
 
         if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
